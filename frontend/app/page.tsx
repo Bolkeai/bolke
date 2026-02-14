@@ -147,19 +147,34 @@ export default function Home() {
         ];
         setSearchResults(products);
 
-        // Return structured summary for Gemini to speak
+        // Build a human-readable summary the agent can speak from directly
+        const zeptoBest = result.zepto[0];
+        const blinkitBest = result.blinkit[0];
+        let summary = `Found ${products.length} results for "${query}". `;
+        if (zeptoBest && blinkitBest) {
+          summary += `Zepto has ${zeptoBest.name} at ₹${zeptoBest.price}. Blinkit has ${blinkitBest.name} at ₹${blinkitBest.price}. `;
+          if (result.price_difference > 0) {
+            summary += `${result.cheapest_provider === 'zepto' ? 'Zepto' : 'Blinkit'} is cheaper by ₹${result.price_difference.toFixed(0)}.`;
+          } else {
+            summary += `Both platforms have the same price.`;
+          }
+        } else if (zeptoBest) {
+          summary += `Found on Zepto: ${zeptoBest.name} at ₹${zeptoBest.price}.`;
+        } else if (blinkitBest) {
+          summary += `Found on Blinkit: ${blinkitBest.name} at ₹${blinkitBest.price}.`;
+        } else {
+          summary = `No results found for "${query}" on either platform.`;
+        }
+
         return {
+          summary,
           cheapest_provider: result.cheapest_provider,
           cheapest_product: result.cheapest_product
             ? { name: result.cheapest_product.name, price: result.cheapest_product.price }
             : null,
           price_difference: result.price_difference,
-          zepto_cheapest: result.zepto.length > 0
-            ? { name: result.zepto[0].name, price: result.zepto[0].price }
-            : null,
-          blinkit_cheapest: result.blinkit.length > 0
-            ? { name: result.blinkit[0].name, price: result.blinkit[0].price }
-            : null,
+          zepto_cheapest: zeptoBest ? { name: zeptoBest.name, price: zeptoBest.price } : null,
+          blinkit_cheapest: blinkitBest ? { name: blinkitBest.name, price: blinkitBest.price } : null,
           total_results: products.length,
         };
       } catch (err) {

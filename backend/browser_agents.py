@@ -5,6 +5,7 @@ and place actual orders.
 """
 
 import asyncio
+import json
 import os
 from dataclasses import dataclass
 
@@ -174,10 +175,34 @@ class BrowserAgentManager:
 
             if result and result.structured_output:
                 output = result.structured_output
-                # Tag the platform name
+                if isinstance(output, dict):
+                    # browser_use returned a raw dict instead of a Pydantic model
+                    products = [ScrapedProduct(**p) for p in output.get('products', [])]
+                    return PlatformSearchResults(products=products, platform=platform)
                 output.platform = platform
                 return output
 
+            # structured_output is None (common when schema has $defs — browser_use
+            # fails JSON-schema validation but the agent still calls done() with the
+            # correct data).  Parse it from the final_result string instead.
+            if result:
+                raw = None
+                try:
+                    # final_result is a property in some versions, method in others
+                    fr = result.final_result
+                    raw = fr() if callable(fr) else fr
+                except Exception:
+                    pass
+                if raw:
+                    try:
+                        data = json.loads(raw)
+                        products = [ScrapedProduct(**p) for p in data.get('products', [])]
+                        print(f"[{platform}] Parsed {len(products)} products from final_result")
+                        return PlatformSearchResults(products=products, platform=platform)
+                    except Exception as e:
+                        print(f"[{platform}] Failed to parse final_result: {e}\nRaw: {raw[:200]}")
+
+            print(f"[{platform}] No results extracted")
             return PlatformSearchResults(products=[], platform=platform)
         finally:
             await browser.close()

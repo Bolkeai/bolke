@@ -186,7 +186,15 @@ async def search_stream(query: str, platforms: str = "zepto,blinkit"):
                 platforms=platform_list,
                 progress=progress,
             )
-            await progress.put({"type": "result", "data": asdict(result)})
+            await progress.put({"type": "result", "data": {
+                "query": query,
+                "zepto": result.zepto_results,
+                "blinkit": result.blinkit_results,
+                "cheapest_provider": result.cheapest_provider,
+                "cheapest_product": result.cheapest_product,
+                "price_difference": result.price_difference,
+                "summary": result.summary,
+            }})
         except Exception as e:
             await progress.put({"type": "error", "message": str(e)})
 

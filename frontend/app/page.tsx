@@ -5,10 +5,11 @@ import { MicButton } from '../components/MicButton';
 import { ProductCard } from '../components/ProductCard';
 import { CartDrawer } from '../components/CartDrawer';
 import { Waveform } from '../components/Waveform';
-import { MOCK_PRODUCTS, SUGGESTED_QUERIES } from '../constants';
-import { Product, CartItem, AppMode, AIAction, Provider } from '../types';
-import { parseUserIntent } from '../services/geminiService';
-import { ShoppingBag, Check, Package, MapPin, Clock, RotateCw } from 'lucide-react';
+import { SUGGESTED_QUERIES } from '../constants';
+import { Product, CartItem, AppMode, Provider } from '../types';
+import { processVoice } from '../services/api';
+import { NativeAudioStreamer } from '../services/nativeAudio';
+import { ShoppingBag, Check, Package, MapPin, Clock, RotateCw, Zap } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 export default function Home() {
@@ -18,9 +19,13 @@ export default function Home() {
   const [cart, setCart] = useState<CartItem[]>([]);
   const [isCartOpen, setIsCartOpen] = useState(false);
   const [lastAIResponse, setLastAIResponse] = useState('');
+  const [sessionId] = useState(() => `session-${Date.now()}`);
+  const [isRecognitionActive, setIsRecognitionActive] = useState(false);
+  const [useNativeAudio, setUseNativeAudio] = useState(true); // Default to native audio
 
   const recognitionRef = useRef<any>(null);
   const synthRef = useRef<SpeechSynthesis | null>(null);
+  const audioStreamerRef = useRef<NativeAudioStreamer | null>(null);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -32,6 +37,8 @@ export default function Home() {
         recognition.lang = 'en-IN';
 
         recognition.onstart = () => {
+          console.log('Recognition started');
+          setIsRecognitionActive(true);
           setMode('LISTENING');
         };
 
@@ -41,12 +48,36 @@ export default function Home() {
           setTranscript(transcriptText);
         };
 
+        recognition.onend = () => {
+          console.log('Recognition ended');
+          setIsRecognitionActive(false);
+        };
+
+        recognition.onerror = (event: any) => {
+          console.error('Recognition error:', event.error);
+          setIsRecognitionActive(false);
+          if (event.error !== 'aborted' && event.error !== 'no-speech') {
+            setMode('IDLE');
+          }
+        };
+
         recognitionRef.current = recognition;
       }
 
       synthRef.current = window.speechSynthesis;
     }
-  }, []);
+
+    // Cleanup function
+    return () => {
+      if (recognitionRef.current && isRecognitionActive) {
+        try {
+          recognitionRef.current.stop();
+        } catch (e) {
+          console.log('Cleanup: Recognition already stopped');
+        }
+      }
+    };
+  }, [isRecognitionActive]);
 
   const addToCart = (product: Product, provider: Provider) => {
     setCart(prev => {
@@ -70,62 +101,90 @@ export default function Home() {
     }
   };
 
-  const handleAIAction = (action: AIAction) => {
-    setLastAIResponse(action.speakResponse);
-    speak(action.speakResponse);
+  const convertBackendResultsToProducts = (searchResults: any): Product[] => {
+    const products: Product[] = [];
+    
+    if (!searchResults) return products;
 
-    switch (action.type) {
-      case 'SEARCH':
-        if (action.query) {
-          const query = action.query.toLowerCase();
-          let results = MOCK_PRODUCTS.filter(p =>
-            p.name.toLowerCase().includes(query) ||
-            p.hindiName?.includes(query) ||
-            p.category.toLowerCase().includes(query)
-          );
-          if (results.length === 0) results = MOCK_PRODUCTS;
-          setDisplayedProducts(results);
-          setMode('RESULTS');
-        }
-        break;
+    const { zepto = [], blinkit = [] } = searchResults;
+    
+    // Combine products from both platforms
+    const productMap = new Map<string, Product>();
+    
+    zepto.forEach((item: any, index: number) => {
+      const key = item.name.toLowerCase();
+      if (!productMap.has(key)) {
+        productMap.set(key, {
+          id: `zepto-${index}`,
+          name: item.name,
+          hindiName: '',
+          image: item.image_url || 'https://picsum.photos/300/300?random=' + index,
+          unit: item.weight || '1 unit',
+          category: 'Groceries',
+          prices: [{
+            provider: 'Zepto',
+            price: item.price,
+            deliveryTime: '10 mins'
+          }]
+        });
+      } else {
+        const existing = productMap.get(key)!;
+        existing.prices.push({
+          provider: 'Zepto',
+          price: item.price,
+          deliveryTime: '10 mins'
+        });
+      }
+    });
 
-      case 'ADD_TO_CART':
-        if (action.productName) {
-          const pName = action.productName.toLowerCase();
-          const product = MOCK_PRODUCTS.find(p => p.name.toLowerCase().includes(pName));
-          if (product) {
-            addToCart(product, action.provider || 'Blinkit');
-            setDisplayedProducts(prev => prev.length > 0 ? prev : MOCK_PRODUCTS);
-            setMode('RESULTS');
-          } else {
-            let results = MOCK_PRODUCTS.filter(p => p.name.toLowerCase().includes(pName));
-            if (results.length === 0) results = MOCK_PRODUCTS;
-            setDisplayedProducts(results);
-            setMode('RESULTS');
-          }
-        }
-        break;
+    blinkit.forEach((item: any, index: number) => {
+      const key = item.name.toLowerCase();
+      if (!productMap.has(key)) {
+        productMap.set(key, {
+          id: `blinkit-${index}`,
+          name: item.name,
+          hindiName: '',
+          image: item.image_url || 'https://picsum.photos/300/300?random=' + (index + 100),
+          unit: item.weight || '1 unit',
+          category: 'Groceries',
+          prices: [{
+            provider: 'Blinkit',
+            price: item.price,
+            deliveryTime: '8 mins'
+          }]
+        });
+      } else {
+        const existing = productMap.get(key)!;
+        existing.prices.push({
+          provider: 'Blinkit',
+          price: item.price,
+          deliveryTime: '8 mins'
+        });
+      }
+    });
 
-      case 'SHOW_CART':
-        setIsCartOpen(true);
-        setMode('CART');
-        break;
-
-      case 'CHECKOUT':
-        setMode('CONFIRMATION');
-        break;
-
-      case 'UNKNOWN':
-      default:
-        setDisplayedProducts(MOCK_PRODUCTS);
-        setMode('RESULTS');
-        break;
-    }
+    return Array.from(productMap.values());
   };
 
   const stopListening = useCallback(async () => {
-    if (recognitionRef.current) {
-      recognitionRef.current.stop();
+    if (useNativeAudio) {
+      // Stop native audio streaming
+      if (audioStreamerRef.current) {
+        audioStreamerRef.current.stopStreaming();
+        audioStreamerRef.current = null;
+      }
+      setIsRecognitionActive(false);
+      setMode('IDLE');
+      return;
+    }
+    
+    // Legacy Web Speech API mode
+    if (recognitionRef.current && isRecognitionActive) {
+      try {
+        recognitionRef.current.stop();
+      } catch (e) {
+        console.error('Error stopping recognition:', e);
+      }
     }
 
     if (!transcript) {
@@ -134,40 +193,157 @@ export default function Home() {
     }
 
     setMode('PROCESSING');
-    const action = await parseUserIntent(transcript);
-    handleAIAction(action);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transcript]);
+    
+    try {
+      // Call the backend API
+      const response = await processVoice({
+        text: transcript,
+        session_id: sessionId,
+        cart: cart.map(item => ({
+          product_name: item.product.name,
+          quantity: item.quantity,
+          provider: item.selectedProvider
+        }))
+      });
 
-  const startListening = () => {
+      // Speak the response
+      setLastAIResponse(response.response_text);
+      speak(response.response_text);
+
+      // Handle different intents
+      if (response.intent === 'SEARCH' && response.search_results) {
+        const products = convertBackendResultsToProducts(response.search_results);
+        setDisplayedProducts(products);
+        setMode('RESULTS');
+      } else if (response.intent === 'CHECKOUT') {
+        setMode('CONFIRMATION');
+      } else if (response.intent === 'SHOW_CART') {
+        setIsCartOpen(true);
+        setMode('CART');
+      } else {
+        setMode('RESULTS');
+      }
+    } catch (error) {
+      console.error('Error processing voice:', error);
+      setLastAIResponse('Sorry, something went wrong. Please try again.');
+      speak('Sorry, something went wrong. Please try again.');
+      setMode('IDLE');
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transcript, sessionId, cart, isRecognitionActive, useNativeAudio]);
+
+  const startListening = async () => {
     setTranscript('');
     setLastAIResponse('');
-    if (recognitionRef.current) {
+    
+    if (useNativeAudio) {
+      // Use native audio streaming
       try {
-        recognitionRef.current.start();
-      } catch (e) {
-        console.error("Mic already active", e);
+        console.log('🎙️ Starting native audio mode');
+        setMode('LISTENING');
+        
+        audioStreamerRef.current = new NativeAudioStreamer(sessionId);
+        
+        await audioStreamerRef.current.startStreaming(
+          () => {
+            // On start
+            console.log('✅ Native audio streaming started');
+            setIsRecognitionActive(true);
+          },
+          () => {
+            // On response
+            console.log('✅ AI response received');
+          },
+          (error) => {
+            // On error
+            console.error('❌ Native audio error:', error);
+            setMode('IDLE');
+            setIsRecognitionActive(false);
+          }
+        );
+      } catch (error: any) {
+        console.error('❌ Failed to start native audio:', error);
+        alert(`Failed to start audio: ${error.message}\\n\\nMake sure:\\n1. Backend is running\\n2. Microphone permission is granted`);
+        setMode('IDLE');
+      }
+    } else {
+      // Use legacy Web Speech API
+      if (recognitionRef.current) {
+        // Stop any existing recognition first
+        if (isRecognitionActive) {
+          try {
+            recognitionRef.current.stop();
+          } catch (e) {
+            console.log('Stop failed, continuing...');
+          }
+        }
+        
+        // Start with a small delay to ensure previous session ended
+        setTimeout(() => {
+          if (recognitionRef.current && !isRecognitionActive) {
+            try {
+              recognitionRef.current.start();
+            } catch (e: any) {
+              console.error("Recognition start error:", e);
+              // If it's already started, just ignore
+              if (e.message?.includes('already started')) {
+                console.log('Recognition already active, will use existing session');
+              } else {
+                setMode('IDLE');
+              }
+            }
+          }
+        }, 100);
       }
     }
   };
 
   const resetApp = () => {
+    // Stop audio streaming if active
+    if (audioStreamerRef.current) {
+      audioStreamerRef.current.stopStreaming();
+      audioStreamerRef.current = null;
+    }
+    
     setCart([]);
     setDisplayedProducts([]);
     setTranscript('');
     setMode('IDLE');
     setLastAIResponse('');
+    setIsRecognitionActive(false);
   };
 
   return (
     <div className="min-h-screen bg-[#FAFAFA] font-sans text-charcoal selection:bg-saffron-200">
       {/* Header */}
       <header className="fixed top-0 left-0 right-0 h-16 bg-white/80 backdrop-blur-md flex items-center justify-between px-6 z-30 border-b border-gray-100">
-        <div className="flex items-center gap-2 cursor-pointer" onClick={resetApp}>
-          <div className="w-8 h-8 rounded-full bg-saffron-500 flex items-center justify-center text-white font-serif font-bold text-xl">
-            B
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 cursor-pointer" onClick={resetApp}>
+            <div className="w-8 h-8 rounded-full bg-saffron-500 flex items-center justify-center text-white font-serif font-bold text-xl">
+              B
+            </div>
+            <span className="font-serif text-xl font-bold text-charcoal">BolkeAI</span>
           </div>
-          <span className="font-serif text-xl font-bold text-charcoal">BolkeAI</span>
+          
+          {/* Native Audio Toggle */}
+          <button
+            onClick={() => {
+              if (isRecognitionActive) {
+                alert('Please stop recording first');
+                return;
+              }
+              setUseNativeAudio(!useNativeAudio);
+            }}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
+              useNativeAudio 
+                ? 'bg-saffron-500 text-white shadow-md' 
+                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+            }`}
+            title={useNativeAudio ? 'Using Native Audio (Gemini Live API)' : 'Using Web Speech API'}
+          >
+            <Zap className={`w-3 h-3 ${useNativeAudio ? 'fill-white' : ''}`} />
+            {useNativeAudio ? 'Native Audio' : 'Legacy Mode'}
+          </button>
         </div>
 
         <button className="relative p-2" onClick={() => setIsCartOpen(true)}>
@@ -208,9 +384,26 @@ export default function Home() {
                   initial={{ opacity: 0, scale: 0.9 }}
                   animate={{ opacity: 1, scale: 1 }}
                   transition={{ delay: 0.4 + (i * 0.1) }}
-                  onClick={() => {
+                  onClick={async () => {
                     setTranscript(q);
-                    handleAIAction({ type: 'SEARCH', query: q, speakResponse: `Searching for ${q}` });
+                    setMode('PROCESSING');
+                    try {
+                      const response = await processVoice({
+                        text: q,
+                        session_id: sessionId,
+                        cart: []
+                      });
+                      setLastAIResponse(response.response_text);
+                      speak(response.response_text);
+                      if (response.search_results) {
+                        const products = convertBackendResultsToProducts(response.search_results);
+                        setDisplayedProducts(products);
+                      }
+                      setMode('RESULTS');
+                    } catch (error) {
+                      console.error('Error:', error);
+                      setMode('IDLE');
+                    }
                   }}
                   className="px-4 py-2 bg-white border border-gray-200 rounded-full text-sm text-gray-600 shadow-sm hover:border-saffron-300 hover:text-saffron-600 transition-colors"
                 >

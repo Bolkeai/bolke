@@ -2,17 +2,28 @@
 Bolke — Browser Automation Agents
 Uses browser-use + Gemini to search grocery platforms in real-time
 and place actual orders.
+
+NOTE: On Windows, browser-use's default Browser() fails inside uvicorn
+because asyncio.create_subprocess_exec raises NotImplementedError.
+We work around this by launching Chrome ourselves via subprocess.Popen
+and connecting browser-use to it via CDP URL.
 """
 
 import asyncio
 import os
+import logging
+import subprocess
+import time
+import socket
 from dataclasses import dataclass
 
-from browser_use import Agent, Browser, BrowserProfile, ChatGoogle
+from browser_use import Agent, Browser, ChatGoogle
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 
@@ -89,30 +100,101 @@ class BrowserAgentManager:
                                  If None, uses a fresh browser (no auth).
         """
         self.chrome_profile_path = chrome_profile_path
-        self._llm = ChatGoogle(model="gemini-2.0-flash", api_key=GOOGLE_API_KEY)
+        # Use Gemini 2.5 Flash - best for agentic use cases and browser automation
+        self._llm = ChatGoogle(model="gemini-2.5-flash", api_key=GOOGLE_API_KEY)
+        self._chrome_process = None
+        self._cdp_port = None
+        logger.info(f"✨ Initialized Browser Agent with model: gemini-2.5-flash")
 
-    def _get_browser(self) -> Browser:
-        """Create a browser instance, optionally with a saved Chrome profile."""
-        if self.chrome_profile_path and os.path.exists(self.chrome_profile_path):
-            try:
-                return Browser(
-                    is_local=True,
-                    browser_profile=BrowserProfile(
-                        user_data_dir=self.chrome_profile_path,
-                        headless=False,  # Show browser for demo visibility
-                    )
-                )
-            except Exception as e:
-                print(f"Warning: Could not use Chrome profile at {self.chrome_profile_path}: {e}")
-                print("Falling back to default browser...")
+    def _find_chrome_executable(self) -> str:
+        """Find Chrome/Chromium executable on this system."""
+        candidates = [
+            # Playwright's managed Chromium (most reliable)
+            os.path.expandvars(r"%LOCALAPPDATA%\ms-playwright\chromium-1208\chrome-win64\chrome.exe"),
+            # Standard Chrome installations
+            os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+        ]
+        # Also check for any version of Playwright chromium
+        pw_base = os.path.expandvars(r"%LOCALAPPDATA%\ms-playwright")
+        if os.path.isdir(pw_base):
+            for d in sorted(os.listdir(pw_base), reverse=True):
+                if d.startswith("chromium-"):
+                    p = os.path.join(pw_base, d, "chrome-win64", "chrome.exe")
+                    if os.path.exists(p):
+                        candidates.insert(0, p)
+
+        for path in candidates:
+            if os.path.exists(path):
+                logger.info(f"🌐 Found Chrome at: {path}")
+                return path
         
-        # Default: use a fresh browser instance (no saved logins)
-        return Browser(
-            is_local=True,
-            browser_profile=BrowserProfile(
-                headless=False,  # Show browser during demo
-            )
+        raise FileNotFoundError(
+            "Chrome/Chromium not found. Run: python -m playwright install chromium"
         )
+
+    def _find_free_port(self) -> int:
+        """Find a free TCP port for CDP."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    def _launch_chrome_with_cdp(self) -> tuple[subprocess.Popen, int]:
+        """
+        Launch Chrome with remote debugging enabled via subprocess.Popen.
+        This works on Windows even inside uvicorn's event loop (unlike
+        asyncio.create_subprocess_exec which raises NotImplementedError).
+        """
+        chrome_path = self._find_chrome_executable()
+        port = self._find_free_port()
+        
+        args = [
+            chrome_path,
+            f"--remote-debugging-port={port}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+        ]
+        
+        # Use a temp user-data-dir so sessions don't clash
+        user_data_dir = os.path.join(os.environ.get("TEMP", "/tmp"), f"bolke_chrome_{port}")
+        args.append(f"--user-data-dir={user_data_dir}")
+        
+        logger.info(f"🚀 Launching Chrome on CDP port {port}")
+        proc = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        
+        # Wait for Chrome to start and CDP to be ready
+        for i in range(20):  # Wait up to 10 seconds
+            time.sleep(0.5)
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=1):
+                    logger.info(f"✅ Chrome CDP ready on port {port} (waited {(i+1)*0.5}s)")
+                    return proc, port
+            except (ConnectionRefusedError, OSError):
+                continue
+        
+        proc.terminate()
+        raise TimeoutError(f"Chrome failed to start CDP on port {port}")
+
+    def _cleanup_chrome(self, proc: subprocess.Popen):
+        """Terminate the Chrome process."""
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+            logger.info("🛑 Chrome process terminated")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not cleanly terminate Chrome: {e}")
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Search agents
@@ -140,47 +222,96 @@ class BrowserAgentManager:
         """
         url = self.PLATFORMS.get(platform, self.PLATFORMS["zepto"])
 
-        task = f"""
-        Go to {url}
-        
-        Search for "{query}" using the search bar on the website.
-        
-        Look at the search results and extract the top {max_results} products.
-        For each product extract:
-        - Full product name (including brand and weight/size)
-        - Price in INR (just the number, e.g. 62.0 not "₹62")
-        - Brand name (if you can identify it)
-        - Weight or quantity (e.g. "1L", "500g", "5kg")
-        - Product image URL (if visible in the page)
-        
-        Set platform to "{platform}".
-        
-        IMPORTANT: 
-        - If a search bar is not immediately visible, look for a search icon or text field
-        - Wait for results to load after searching
-        - Extract ACTUAL prices shown on the page, not estimated ones
-        - If the site asks for location/pincode, try to dismiss it or enter pincode 560001 (Bangalore)
-        """
+        logger.info(f"🔍 Searching {platform} for: '{query}'")
+        logger.info(f"   URL: {url}")
+        logger.info(f"   Max results: {max_results}")
 
-        browser = self._get_browser()
+        # Use direct search URL for faster results
+        search_url = f"{url}/s/?q={query.replace(' ', '+')}"
+        
+        task = f"""Go to: {search_url}
+
+If a location popup appears:
+1. Type "New Delhi" in the location/search field
+2. Click on any location suggestion that appears in the dropdown
+3. Wait for the page to load
+
+Then look at the search results and tell me about the TOP {max_results} PRODUCTS YOU CAN SEE:
+
+For EACH product card visible on screen, extract:
+- name: The full product name (including brand and size)
+- price: The price in rupees (if it shows ₹75, write 75.0)  
+- brand: Brand name
+- weight: Size like "1 kg", "500 g", "1 ltr"
+- image_url: Product image URL if visible
+
+IMPORTANT:
+- Only report what you ACTUALLY SEE on the screen right now
+- Do NOT make up or guess any data
+- If you don't see {max_results} products, that's okay - just report what you see
+- Skip products where price is not clearly visible
+
+Return platform as "{platform}".
+"""
+
+        chrome_proc = None
         try:
+            # Launch Chrome ourselves (avoids Windows asyncio subprocess crash)
+            chrome_proc, cdp_port = self._launch_chrome_with_cdp()
+            
+            # Connect browser-use to our Chrome via CDP
+            browser = Browser(cdp_url=f"http://127.0.0.1:{cdp_port}")
+            
+            logger.info(f"   Creating Agent with task...")
             agent = Agent(
                 task=task,
                 llm=self._llm,
                 browser=browser,
                 output_model_schema=PlatformSearchResults,
             )
+            
+            logger.info(f"   Running agent task...")
             result = await agent.run()
+            logger.info(f"   Agent completed")
 
+            # Extract structured output (browser-use returns it in result.structured_output)
             if result and result.structured_output:
                 output = result.structured_output
+                
                 # Tag the platform name
                 output.platform = platform
+                
+                # Validate that we got real data (basic checks)
+                real_products = []
+                for p in output.products:
+                    # Skip products with suspicious/placeholder data
+                    if p.price <= 0:
+                        logger.warning(f"   ⚠️ Skipping product with invalid price: {p.name}")
+                        continue
+                    if not p.name or len(p.name) < 3:
+                        logger.warning(f"   ⚠️ Skipping product with invalid name: {p.name}")
+                        continue
+                    real_products.append(p)
+                
+                output.products = real_products
+                logger.info(f"✅ Found {len(output.products)} valid products on {platform}")
+                for i, p in enumerate(output.products[:3]):
+                    logger.info(f"   {i+1}. {p.name} - ₹{p.price}")
+                
+                if len(real_products) == 0:
+                    logger.warning(f"⚠️ No valid products found on {platform} - agent may not have scraped correctly")
+                    
                 return output
 
+            logger.warning(f"⚠️ No valid result from agent for {platform}")
+            return PlatformSearchResults(products=[], platform=platform)
+            
+        except Exception as e:
+            logger.error(f"❌ Error searching {platform}: {e}", exc_info=True)
             return PlatformSearchResults(products=[], platform=platform)
         finally:
-            await browser.close()
+            if chrome_proc:
+                self._cleanup_chrome(chrome_proc)
 
     async def search_and_compare(
         self,
@@ -197,15 +328,20 @@ class BrowserAgentManager:
         Returns:
             ComparisonResult with products from both platforms and cheapest option
         """
+        logger.info(f"🔄 Starting parallel search for: '{query}'")
+        logger.info(f"   Max results per platform: {max_results}")
+        
         # Run both searches in parallel
         zepto_task = self.search_platform(query, "zepto", max_results)
         blinkit_task = self.search_platform(query, "blinkit", max_results)
 
+        logger.info("   Waiting for both searches to complete...")
         zepto_results, blinkit_results = await asyncio.gather(
             zepto_task,
             blinkit_task,
             return_exceptions=True,
         )
+        logger.info("   Both searches completed")
 
         # Handle errors gracefully
         zepto_products = []
@@ -213,13 +349,15 @@ class BrowserAgentManager:
 
         if isinstance(zepto_results, PlatformSearchResults):
             zepto_products = [p.model_dump() for p in zepto_results.products]
+            logger.info(f"✅ Zepto: {len(zepto_products)} products")
         else:
-            print(f"Zepto search error: {zepto_results}")
+            logger.error(f"❌ Zepto search error: {zepto_results}")
 
         if isinstance(blinkit_results, PlatformSearchResults):
             blinkit_products = [p.model_dump() for p in blinkit_results.products]
+            logger.info(f"✅ Blinkit: {len(blinkit_products)} products")
         else:
-            print(f"Blinkit search error: {blinkit_results}")
+            logger.error(f"❌ Blinkit search error: {blinkit_results}")
 
         # Find cheapest across both platforms
         all_products = [
@@ -249,6 +387,11 @@ class BrowserAgentManager:
         summary = self._build_comparison_summary(
             query, zepto_products, blinkit_products, cheaper, price_diff
         )
+
+        logger.info(f"📊 Comparison complete:")
+        logger.info(f"   Cheapest provider: {cheaper}")
+        logger.info(f"   Price difference: ₹{price_diff:.2f}")
+        logger.info(f"   Total products found: {len(all_products)}")
 
         return ComparisonResult(
             zepto_results=zepto_products,
@@ -288,60 +431,96 @@ class BrowserAgentManager:
     async def place_order(
         self,
         items: list[str],
-        provider: str = "zepto",
+        provider: str = "blinkit",
         address: str = "",
     ) -> OrderConfirmation:
         """
-        Place a REAL order on a grocery platform using browser-use.
+        FULLY AUTOMATED order placement - adds items to cart and completes checkout.
         
-        The agent navigates the platform, adds items to cart,
-        proceeds to checkout, selects COD, and places the order.
+        The agent will:
+        1. Add all items to cart
+        2. Go to checkout
+        3. Select COD payment
+        4. Place the order automatically
         
         Args:
-            items: List of product names to order (e.g. ["Amul Milk 1L", "Bread"])
+            items: List of product names to order (e.g. ["Amul Milk 1L"])
             provider: "zepto" or "blinkit"
-            address: Delivery address hint (agent uses pre-saved address)
+            address: Not used (user must be logged in with saved address)
             
         Returns:
-            OrderConfirmation with order ID, tracking, and status
+            OrderConfirmation with order ID and delivery details
         """
-        url = self.PLATFORMS.get(provider, self.PLATFORMS["zepto"])
-        items_formatted = "\n".join(f"  - {item}" for item in items)
+        url = self.PLATFORMS.get(provider, self.PLATFORMS["blinkit"])
+        items_formatted = "\n".join(f"  {i+1}. {item}" for i, item in enumerate(items))
 
         task = f"""
-        Go to {url}
-
-        You need to order these items:
+        FULLY AUTOMATED ORDER FLOW - Complete the entire order without stopping.
+        
+        Requirements:
+        - You MUST be logged in to {provider} (using saved Chrome profile)
+        - You MUST have a saved delivery address
+        
+        Items to order:
 {items_formatted}
 
-        For EACH item:
-        1. Search for the item using the search bar
-        2. Find the best matching product
-        3. Click "Add" or "Add to Cart" button
-        4. Go back to search for the next item
+        STEP-BY-STEP INSTRUCTIONS:
 
-        After adding ALL items:
-        5. Go to the cart
-        6. Proceed to checkout
-        7. Verify the delivery address{f' (should be: {address})' if address else ''}
-        8. Select "Cash on Delivery" as payment method
-        9. Place the order / Confirm the order
+        === PHASE 1: ADD ITEMS TO CART ===
+        For each item in the list:
+        1. Navigate to: {url}/s/?q={{item_name}} (replace spaces with +)
+        2. Wait 3 seconds for search results
+        3. Find the FIRST product that matches
+        4. Click the "Add" or "ADD" button
+        5. Wait 2 seconds
+        6. Continue to next item
 
-        After order is placed:
-        10. Extract the order ID / confirmation number
-        11. Extract the estimated delivery time
-        12. Extract the total amount paid
-        13. Note the tracking URL if available
+        === PHASE 2: GO TO CHECKOUT ===
+        7. Click on Cart icon (usually top-right corner)
+        8. Review items in cart
+        9. Click "Proceed to Checkout" or "Checkout" button
+        10. Wait for checkout page to load
+
+        === PHASE 3: CONFIRM ADDRESS ===
+        11. Verify delivery address is shown
+        12. If prompted to select/confirm address, click "Deliver Here" or similar
+        13. Proceed to payment section
+
+        === PHASE 4: SELECT PAYMENT & PLACE ORDER ===
+        14. Look for payment options
+        15. Select "Cash on Delivery" (COD) option
+        16. Click "Place Order" or "Confirm Order" button
+        17. Wait for order confirmation page
+
+        === PHASE 5: EXTRACT ORDER DETAILS ===
+        18. Extract order ID/number from confirmation page
+        19. Extract estimated delivery time
+        20. Extract total amount paid
+        21. Note any tracking URL if visible
 
         IMPORTANT:
-        - If asked for location, allow location access or enter pincode
-        - If an item is not found, skip it and note it in the message
-        - Do NOT actually pay — only select COD (Cash on Delivery)
-        - Set success to true only if the order confirmation page appears
+        - If location popup appears, select "Delhi" or "Bangalore"
+        - If any item is out of stock, note it in message but continue with others
+        - If login required, set success=false with message "Please login first"
+        - Set success=true ONLY if you see "Order Placed" or confirmation page
+        - If anything fails, set success=false and explain in message
+
+        Return structured data:
+        - success: true/false
+        - order_id: confirmation number from page
+        - estimated_delivery: time shown (e.g. "20 minutes", "tomorrow")
+        - total_amount: final amount in rupees
+        - message: "Order placed successfully" or error details
         """
 
-        browser = self._get_browser()
+        chrome_proc = None
         try:
+            logger.info(f"🛒 AUTOMATED ORDER: {len(items)} items on {provider}")
+            logger.info("   ⚠️  This will ACTUALLY place a real order!")
+            
+            chrome_proc, cdp_port = self._launch_chrome_with_cdp()
+            browser = Browser(cdp_url=f"http://127.0.0.1:{cdp_port}")
+            
             agent = Agent(
                 task=task,
                 llm=self._llm,
@@ -351,14 +530,29 @@ class BrowserAgentManager:
             result = await agent.run()
 
             if result and result.structured_output:
-                return result.structured_output
+                output = result.structured_output
+                if output.success:
+                    logger.info(f"✅ ORDER PLACED! ID: {output.order_id}")
+                    logger.info(f"   Delivery: {output.estimated_delivery}")
+                    logger.info(f"   Total: ₹{output.total_amount}")
+                else:
+                    logger.warning(f"⚠️ Order failed: {output.message}")
+                return output
 
             return OrderConfirmation(
                 success=False,
-                message="Browser agent did not return structured output",
+                message="Agent did not complete the order flow. Check if you're logged in.",
+            )
+        except Exception as e:
+            logger.error(f"❌ Order placement failed: {e}")
+            return OrderConfirmation(
+                success=False,
+                message=f"Error during order: {str(e)}",
             )
         finally:
-            await browser.close()
+            if chrome_proc:
+                self._cleanup_chrome(chrome_proc)
+            logger.info("🌐 Browser closed")
 
 
 # ---------------------------------------------------------------------------

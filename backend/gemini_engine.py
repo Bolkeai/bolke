@@ -6,12 +6,15 @@ and generates conversational Hindi responses.
 
 import json
 import os
+import logging
 from dataclasses import dataclass, field
 
 import google.generativeai as genai
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
@@ -92,10 +95,12 @@ Examples:
 """
 
     def __init__(self):
+        # Use Gemini 2.5 Flash - best for reasoning and conversational tasks
         self.model = genai.GenerativeModel(
-            model_name="gemini-2.0-flash",
+            model_name="gemini-2.5-flash",
             system_instruction=self.SYSTEM_PROMPT,
         )
+        logger.info(f"✨ Initialized Gemini Engine with model: gemini-2.5-flash")
         # Per-session conversation history
         self._sessions: dict[str, list[dict]] = {}
 
@@ -129,8 +134,11 @@ Examples:
         Returns:
             ParsedIntent with structured data and Hindi response
         """
+        logger.info(f"🤖 Parsing intent for: '{user_text}'")
         cart = cart or []
         history = self._get_history(session_id)
+        logger.info(f"   Cart size: {len(cart)}")
+        logger.info(f"   History size: {len(history)}")
 
         prompt = self.PARSE_PROMPT.format(
             user_text=user_text,
@@ -138,8 +146,10 @@ Examples:
             history=json.dumps(history, ensure_ascii=False),
         )
 
+        logger.info("   Calling Gemini API...")
         response = self.model.generate_content(prompt)
         raw_text = response.text.strip()
+        logger.info(f"   Raw Gemini response: {raw_text[:200]}...")
 
         # Clean up markdown code fences if Gemini wraps the JSON
         if raw_text.startswith("```"):
@@ -150,7 +160,12 @@ Examples:
 
         try:
             data = json.loads(raw_text)
-        except json.JSONDecodeError:
+            logger.info(f"✅ Successfully parsed JSON")
+            logger.info(f"   Intent: {data.get('intent')}")
+            logger.info(f"   Products: {data.get('products')}")
+        except json.JSONDecodeError as e:
+            logger.warning(f"⚠️ Failed to parse JSON: {e}")
+            logger.info("   Using fallback search intent")
             # Fallback: treat as a search query with the original text
             data = {
                 "intent": "SEARCH",

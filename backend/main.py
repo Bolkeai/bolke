@@ -9,15 +9,22 @@ Endpoints:
     GET  /              — Serve the frontend
 """
 
+import asyncio
+import json
 import os
+import sys
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 
+# Windows requires ProactorEventLoop for subprocess support (browser_use uses create_subprocess_exec)
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -166,6 +173,44 @@ async def process_voice(req: VoiceRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Voice processing failed: {str(e)}")
+
+
+@app.get("/api/search/stream")
+async def search_stream(query: str, platforms: str = "zepto,blinkit"):
+    """
+    SSE endpoint — streams real progress as browser_use searches each platform,
+    then sends the final results as the last event.
+    """
+    platform_list = [p.strip() for p in platforms.split(",")]
+    progress: asyncio.Queue = asyncio.Queue()
+
+    async def run():
+        try:
+            result = await agent_manager.search_and_compare_with_progress(
+                query=query,
+                platforms=platform_list,
+                progress=progress,
+            )
+            await progress.put({"type": "result", "data": asdict(result)})
+        except Exception as e:
+            await progress.put({"type": "error", "message": str(e)})
+
+    async def event_stream():
+        task = asyncio.create_task(run())
+        try:
+            while True:
+                msg = await progress.get()
+                yield f"data: {json.dumps(msg)}\n\n"
+                if msg.get("type") in ("result", "error"):
+                    break
+        finally:
+            task.cancel()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/api/search")

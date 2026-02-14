@@ -259,6 +259,86 @@ class BrowserAgentManager:
             summary=summary,
         )
 
+    async def search_and_compare_with_progress(
+        self,
+        query: str,
+        platforms: list[str],
+        progress: asyncio.Queue,
+        max_results: int = 5,
+    ) -> ComparisonResult:
+        """
+        Same as search_and_compare but emits real progress events into `progress` queue
+        as each platform search runs.
+        """
+        await progress.put({"type": "log", "message": f'Searching for "{query}" on {" and ".join(p.title() for p in platforms)}…'})
+
+        async def run_zepto():
+            await progress.put({"type": "log", "message": "Opening Zepto…"})
+            result = await self.search_platform(query, "zepto", max_results)
+            count = len(result.products)
+            await progress.put({
+                "type": "log",
+                "message": f"Zepto: found {count} result{'s' if count != 1 else ''}" if count else "Zepto: no results found",
+            })
+            return result
+
+        async def run_blinkit():
+            await progress.put({"type": "log", "message": "Opening Blinkit…"})
+            result = await self.search_platform(query, "blinkit", max_results)
+            count = len(result.products)
+            await progress.put({
+                "type": "log",
+                "message": f"Blinkit: found {count} result{'s' if count != 1 else ''}" if count else "Blinkit: no results found",
+            })
+            return result
+
+        tasks = []
+        if "zepto" in platforms:
+            tasks.append(run_zepto())
+        if "blinkit" in platforms:
+            tasks.append(run_blinkit())
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        zepto_results_obj = next((r for r in results if isinstance(r, PlatformSearchResults) and r.platform == "zepto"), None)
+        blinkit_results_obj = next((r for r in results if isinstance(r, PlatformSearchResults) and r.platform == "blinkit"), None)
+
+        zepto_products = [p.model_dump() for p in zepto_results_obj.products] if zepto_results_obj else []
+        blinkit_products = [p.model_dump() for p in blinkit_results_obj.products] if blinkit_results_obj else []
+
+        await progress.put({"type": "log", "message": "Comparing prices…"})
+
+        all_products = (
+            [{**p, "provider": "zepto"} for p in zepto_products]
+            + [{**p, "provider": "blinkit"} for p in blinkit_products]
+        )
+        cheapest = min(all_products, key=lambda x: x.get("price", float("inf"))) if all_products else None
+
+        zepto_min = min((p["price"] for p in zepto_products), default=0)
+        blinkit_min = min((p["price"] for p in blinkit_products), default=0)
+        price_diff = abs(zepto_min - blinkit_min)
+
+        if zepto_min > 0 and blinkit_min > 0:
+            cheaper = "zepto" if zepto_min <= blinkit_min else "blinkit"
+        elif zepto_min > 0:
+            cheaper = "zepto"
+        elif blinkit_min > 0:
+            cheaper = "blinkit"
+        else:
+            cheaper = "unknown"
+
+        summary = self._build_comparison_summary(query, zepto_products, blinkit_products, cheaper, price_diff)
+        await progress.put({"type": "log", "message": f"Done — {cheaper.title()} is cheaper" if cheaper != "unknown" else "Done"})
+
+        return ComparisonResult(
+            zepto_results=zepto_products,
+            blinkit_results=blinkit_products,
+            cheapest_provider=cheaper,
+            cheapest_product=cheapest,
+            price_difference=price_diff,
+            summary=summary,
+        )
+
     def _build_comparison_summary(
         self,
         query: str,

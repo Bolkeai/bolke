@@ -22,12 +22,17 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, onAdd, isAdde
       className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100 flex flex-col h-full"
     >
       <div className="relative mb-4 overflow-hidden rounded-xl aspect-square bg-gray-50">
-        <img
-          src={product.image}
-          alt={product.name}
-          className="object-cover w-full h-full mix-blend-multiply"
-          loading="lazy"
-        />
+        {product.image ? (
+          <img
+            src={product.image}
+            alt={product.name}
+            className="object-cover w-full h-full mix-blend-multiply"
+            loading="lazy"
+            onError={(e) => { e.currentTarget.style.display = 'none'; }}
+          />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center text-4xl">🛒</div>
+        )}
         {bestPrice.price < (product.prices[1]?.price || Infinity) && (
           <div className="absolute top-2 left-2 bg-green-100 text-green-800 text-xs font-bold px-2 py-1 rounded-full">
             Best Value

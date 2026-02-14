@@ -8,12 +8,11 @@ import json
 import os
 from dataclasses import dataclass, field
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 
 load_dotenv()
-
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -92,10 +91,8 @@ Examples:
 """
 
     def __init__(self):
-        self.model = genai.GenerativeModel(
-            model_name="gemini-2.0-flash",
-            system_instruction=self.SYSTEM_PROMPT,
-        )
+        self._client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+        self._model = "gemini-2.0-flash"
         # Per-session conversation history
         self._sessions: dict[str, list[dict]] = {}
 
@@ -138,7 +135,11 @@ Examples:
             history=json.dumps(history, ensure_ascii=False),
         )
 
-        response = self.model.generate_content(prompt)
+        response = self._client.models.generate_content(
+            model=self._model,
+            contents=prompt,
+            config=types.GenerateContentConfig(system_instruction=self.SYSTEM_PROMPT),
+        )
         raw_text = response.text.strip()
 
         # Clean up markdown code fences if Gemini wraps the JSON
@@ -211,7 +212,11 @@ Generate a SHORT, natural Hindi/Hinglish response like a kirana owner would:
 
 Respond with ONLY the response text, no JSON."""
 
-        response = self.model.generate_content(prompt)
+        response = self._client.models.generate_content(
+            model=self._model,
+            contents=prompt,
+            config=types.GenerateContentConfig(system_instruction=self.SYSTEM_PROMPT),
+        )
         text = response.text.strip()
         self._add_to_history(session_id, "assistant", text)
         return text

@@ -1,169 +1,245 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { MicButton } from '../components/MicButton';
-import { ProductCard } from '../components/ProductCard';
-import { CartDrawer } from '../components/CartDrawer';
-import { Waveform } from '../components/Waveform';
-import { MOCK_PRODUCTS, SUGGESTED_QUERIES } from '../constants';
-import { Product, CartItem, AppMode, AIAction, Provider } from '../types';
-import { parseUserIntent } from '../services/geminiService';
-import { ShoppingBag, Check, Package, MapPin, Clock, RotateCw } from 'lucide-react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { ShoppingBag, Mic, MicOff, Loader2 } from 'lucide-react';
+
+import { LanguageSelector } from '../components/LanguageSelector';
+import { Waveform } from '../components/Waveform';
+import { CartDrawer } from '../components/CartDrawer';
+import { ProductCard } from '../components/ProductCard';
+
+import { useLiveAgent, AgentStatus, ToolCall } from '../hooks/useLiveAgent';
+import { LANGUAGES, DEFAULT_LANGUAGE, Language } from '../lib/languages';
+import { CartItem, Product, Provider } from '../types';
+import { streamSearch, ScrapedProduct } from '../services/backendService';
+
+// ── Status helpers ────────────────────────────────────────────────────────────
+
+function statusLabel(status: AgentStatus, language: Language): string {
+  const labels: Record<AgentStatus, Record<string, string>> = {
+    idle:       { 'hi': 'शुरू करने के लिए माइक दबाओ', 'en': 'Tap mic to start', 'kn': 'Mic tap maadi shuru maadi', 'te': 'Mic tap cheyyi', 'ta': 'Mic tap pannunga' },
+    connecting: { 'hi': 'जुड़ रहा है...', 'en': 'Connecting...', 'kn': 'Connect aagtha ide...', 'te': 'Connect avutundi...', 'ta': 'Connect aaguthu...' },
+    listening:  { 'hi': 'सुन रहा हूं...', 'en': 'Listening...', 'kn': 'Kelthaidini...', 'te': 'Vinuthunnanu...', 'ta': 'Ketkirein...' },
+    thinking:   { 'hi': 'सुन रहा हूं...', 'en': 'Listening...', 'kn': 'Kelthaidini...', 'te': 'Vinuthunnanu...', 'ta': 'Ketkirein...' },
+    speaking:   { 'hi': 'बोल रहा हूं...', 'en': 'Speaking...', 'kn': 'Heltha ide...', 'te': 'Maatladutunnanu...', 'ta': 'Pesukiren...' },
+    error:      { 'hi': 'कुछ गलत हुआ', 'en': 'Something went wrong', 'kn': 'Enu thappaaythu', 'te': 'Emi tappu jarigindi', 'ta': 'Enna thappaa nadandhuchu' },
+  };
+  return labels[status]?.[language.code] ?? labels[status]['en'];
+}
+
+// ── Mic button ────────────────────────────────────────────────────────────────
+
+function MicToggle({ status, onStart, onStop }: {
+  status: AgentStatus;
+  onStart: () => void;
+  onStop: () => void;
+}) {
+  const isActive = status !== 'idle' && status !== 'error';
+  const isListening = status === 'listening';
+  const isThinking = status === 'connecting';
+  const isSpeaking = status === 'speaking';
+
+  return (
+    <div className="relative flex items-center justify-center">
+      {/* Ripple when listening */}
+      {isListening && (
+        <>
+          <motion.div
+            className="absolute rounded-full bg-saffron-400 opacity-25"
+            initial={{ width: 80, height: 80 }}
+            animate={{ width: 200, height: 200, opacity: 0 }}
+            transition={{ duration: 1.8, repeat: Infinity, ease: 'easeOut' }}
+          />
+          <motion.div
+            className="absolute rounded-full bg-saffron-500 opacity-20"
+            initial={{ width: 80, height: 80 }}
+            animate={{ width: 150, height: 150, opacity: 0 }}
+            transition={{ duration: 1.8, repeat: Infinity, ease: 'easeOut', delay: 0.6 }}
+          />
+        </>
+      )}
+
+      <motion.button
+        onClick={isActive ? onStop : onStart}
+        whileTap={{ scale: 0.93 }}
+        animate={{ scale: isListening ? 1.08 : 1 }}
+        className={`relative z-10 flex items-center justify-center w-20 h-20 md:w-24 md:h-24 rounded-full shadow-2xl transition-colors duration-300 ${
+          isActive ? 'bg-gray-900 border border-gray-700' : 'bg-gray-900 border border-gray-800'
+        }`}
+        aria-label={isActive ? 'Stop' : 'Start'}
+      >
+        {isThinking ? (
+          <Loader2 className="w-9 h-9 text-white animate-spin" />
+        ) : isSpeaking ? (
+          <Waveform className="h-10 w-14" barColor="from-white to-gray-300" />
+        ) : isListening ? (
+          <MicOff className="w-9 h-9 text-white" />
+        ) : (
+          <Mic className="w-9 h-9 text-white" />
+        )}
+      </motion.button>
+    </div>
+  );
+}
+
+// ── Backend result mapper ─────────────────────────────────────────────────────
+
+function mapToProduct(item: ScrapedProduct, platform: 'zepto' | 'blinkit'): Product {
+  const provider: Provider = platform === 'zepto' ? 'Zepto' : 'Blinkit';
+  return {
+    id: `${platform}-${item.name}-${item.price}`,
+    name: item.name,
+    image: item.image_url ?? '',
+    unit: item.weight || item.brand || '',
+    category: 'grocery',
+    prices: [{
+      provider,
+      price: item.price,
+      deliveryTime: platform === 'zepto' ? '~10 min' : '~12 min',
+    }],
+  };
+}
+
+// ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function Home() {
-  const [mode, setMode] = useState<AppMode>('IDLE');
-  const [transcript, setTranscript] = useState('');
-  const [displayedProducts, setDisplayedProducts] = useState<Product[]>([]);
+  const [language, setLanguage] = useState<Language>(DEFAULT_LANGUAGE);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [isCartOpen, setIsCartOpen] = useState(false);
-  const [lastAIResponse, setLastAIResponse] = useState('');
+  const [agentTranscript, setAgentTranscript] = useState('');
+  const [userTranscript, setUserTranscript] = useState('');
+  const [searchResults, setSearchResults] = useState<Product[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchLogs, setSearchLogs] = useState<string[]>([]);
 
-  const recognitionRef = useRef<any>(null);
-  const synthRef = useRef<SpeechSynthesis | null>(null);
+  // Accumulate agent transcript chunks and batch-update every 150ms
+  const agentChunksRef = useRef('');
+  const agentDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearAgentRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-      if (SpeechRecognition) {
-        const recognition = new SpeechRecognition();
-        recognition.continuous = false;
-        recognition.interimResults = true;
-        recognition.lang = 'en-IN';
+  // Clear agent transcript 4s after speaking stops
+  const prevStatusRef = useRef<AgentStatus>('idle');
 
-        recognition.onstart = () => {
-          setMode('LISTENING');
+  // Tool call handler
+  const handleToolCall = useCallback(async (call: ToolCall): Promise<unknown> => {
+    console.log('[Tool call]', call.name, call.args);
+
+    if (call.name === 'search_products') {
+      const query = call.args.query as string;
+      const platforms = (call.args.platforms as string[] | undefined) ?? ['zepto', 'blinkit'];
+
+      setSearchQuery(query);
+      setIsSearching(true);
+      setSearchResults([]);
+      setSearchLogs([]);
+
+      try {
+        const result = await streamSearch(query, platforms, (msg) => {
+          setSearchLogs(prev => [...prev, msg]);
+        });
+
+        // Map to Product shape for ProductCard
+        const products: Product[] = [
+          ...result.zepto.map(p => mapToProduct(p, 'zepto')),
+          ...result.blinkit.map(p => mapToProduct(p, 'blinkit')),
+        ];
+        setSearchResults(products);
+
+        // Return structured summary for Gemini to speak
+        return {
+          cheapest_provider: result.cheapest_provider,
+          cheapest_product: result.cheapest_product
+            ? { name: result.cheapest_product.name, price: result.cheapest_product.price }
+            : null,
+          price_difference: result.price_difference,
+          zepto_cheapest: result.zepto.length > 0
+            ? { name: result.zepto[0].name, price: result.zepto[0].price }
+            : null,
+          blinkit_cheapest: result.blinkit.length > 0
+            ? { name: result.blinkit[0].name, price: result.blinkit[0].price }
+            : null,
+          total_results: products.length,
         };
-
-        recognition.onresult = (event: any) => {
-          const current = event.resultIndex;
-          const transcriptText = event.results[current][0].transcript;
-          setTranscript(transcriptText);
-        };
-
-        recognitionRef.current = recognition;
+      } catch (err) {
+        console.error('[search_products]', err);
+        return { error: 'Search failed, please try again' };
+      } finally {
+        setIsSearching(false);
       }
+    }
 
-      synthRef.current = window.speechSynthesis;
+    if (call.name === 'place_order') return { message: 'Order placement coming in Phase 3' };
+    return {};
+  }, []);
+
+  const handleTranscript = useCallback((text: string, isAgent: boolean) => {
+    if (isAgent) {
+      // Accumulate chunks, batch state update at 150ms intervals
+      agentChunksRef.current += text;
+      if (agentDebounceRef.current) clearTimeout(agentDebounceRef.current);
+      agentDebounceRef.current = setTimeout(() => {
+        setAgentTranscript(agentChunksRef.current);
+      }, 150);
+    } else {
+      setUserTranscript(text);
     }
   }, []);
 
-  const addToCart = (product: Product, provider: Provider) => {
+  const { status, error, connect, disconnect } = useLiveAgent({
+    language,
+    onToolCall: handleToolCall,
+    onTranscript: handleTranscript,
+  });
+
+  // Clear transcripts when agent finishes speaking
+  useEffect(() => {
+    if (prevStatusRef.current === 'speaking' && status !== 'speaking') {
+      if (clearAgentRef.current) clearTimeout(clearAgentRef.current);
+      clearAgentRef.current = setTimeout(() => {
+        agentChunksRef.current = '';
+        setAgentTranscript('');
+      }, 4000);
+    }
+    if (status === 'idle') {
+      agentChunksRef.current = '';
+      setAgentTranscript('');
+      setUserTranscript('');
+      setSearchResults([]);
+      setSearchQuery('');
+      setSearchLogs([]);
+    }
+    prevStatusRef.current = status;
+  }, [status]);
+
+  const addToCart = useCallback((product: Product, provider: Provider) => {
     setCart(prev => {
       const existing = prev.find(i => i.product.id === product.id && i.selectedProvider === provider);
       if (existing) {
-        return prev.map(i => i === existing ? { ...i, quantity: i.quantity + 1 } : i);
+        return prev.map(i =>
+          i.product.id === product.id && i.selectedProvider === provider
+            ? { ...i, quantity: i.quantity + 1 }
+            : i,
+        );
       }
       return [...prev, { product, quantity: 1, selectedProvider: provider }];
     });
-  };
+  }, []);
 
-  const speak = (text: string) => {
-    if (synthRef.current) {
-      const utterance = new SpeechSynthesisUtterance(text);
-      const voices = synthRef.current.getVoices();
-      const indianVoice = voices.find(v => v.lang.includes('IN')) || voices[0];
-      if (indianVoice) utterance.voice = indianVoice;
-      utterance.rate = 1.0;
-      utterance.pitch = 1.0;
-      synthRef.current.speak(utterance);
-    }
-  };
+  const isActive = status !== 'idle' && status !== 'error';
 
-  const handleAIAction = (action: AIAction) => {
-    setLastAIResponse(action.speakResponse);
-    speak(action.speakResponse);
-
-    switch (action.type) {
-      case 'SEARCH':
-        if (action.query) {
-          const query = action.query.toLowerCase();
-          let results = MOCK_PRODUCTS.filter(p =>
-            p.name.toLowerCase().includes(query) ||
-            p.hindiName?.includes(query) ||
-            p.category.toLowerCase().includes(query)
-          );
-          if (results.length === 0) results = MOCK_PRODUCTS;
-          setDisplayedProducts(results);
-          setMode('RESULTS');
-        }
-        break;
-
-      case 'ADD_TO_CART':
-        if (action.productName) {
-          const pName = action.productName.toLowerCase();
-          const product = MOCK_PRODUCTS.find(p => p.name.toLowerCase().includes(pName));
-          if (product) {
-            addToCart(product, action.provider || 'Blinkit');
-            setDisplayedProducts(prev => prev.length > 0 ? prev : MOCK_PRODUCTS);
-            setMode('RESULTS');
-          } else {
-            let results = MOCK_PRODUCTS.filter(p => p.name.toLowerCase().includes(pName));
-            if (results.length === 0) results = MOCK_PRODUCTS;
-            setDisplayedProducts(results);
-            setMode('RESULTS');
-          }
-        }
-        break;
-
-      case 'SHOW_CART':
-        setIsCartOpen(true);
-        setMode('CART');
-        break;
-
-      case 'CHECKOUT':
-        setMode('CONFIRMATION');
-        break;
-
-      case 'UNKNOWN':
-      default:
-        setDisplayedProducts(MOCK_PRODUCTS);
-        setMode('RESULTS');
-        break;
-    }
-  };
-
-  const stopListening = useCallback(async () => {
-    if (recognitionRef.current) {
-      recognitionRef.current.stop();
-    }
-
-    if (!transcript) {
-      setMode('IDLE');
-      return;
-    }
-
-    setMode('PROCESSING');
-    const action = await parseUserIntent(transcript);
-    handleAIAction(action);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transcript]);
-
-  const startListening = () => {
-    setTranscript('');
-    setLastAIResponse('');
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.start();
-      } catch (e) {
-        console.error("Mic already active", e);
-      }
-    }
-  };
-
-  const resetApp = () => {
-    setCart([]);
-    setDisplayedProducts([]);
-    setTranscript('');
-    setMode('IDLE');
-    setLastAIResponse('');
+  const handleLanguageChange = (lang: Language) => {
+    if (isActive) disconnect();
+    setLanguage(lang);
   };
 
   return (
     <div className="min-h-screen bg-[#FAFAFA] font-sans text-charcoal selection:bg-saffron-200">
+
       {/* Header */}
       <header className="fixed top-0 left-0 right-0 h-16 bg-white/80 backdrop-blur-md flex items-center justify-between px-6 z-30 border-b border-gray-100">
-        <div className="flex items-center gap-2 cursor-pointer" onClick={resetApp}>
+        <div className="flex items-center gap-2">
           <div className="w-8 h-8 rounded-full bg-saffron-500 flex items-center justify-center text-white font-serif font-bold text-xl">
             B
           </div>
@@ -180,216 +256,139 @@ export default function Home() {
         </button>
       </header>
 
-      <main className="pt-24 pb-32 px-4 max-w-4xl mx-auto min-h-screen flex flex-col">
+      {/* Main */}
+      <main className="pt-20 pb-36 px-4 max-w-2xl mx-auto min-h-screen flex flex-col items-center justify-center gap-10">
 
-        {/* IDLE */}
-        {mode === 'IDLE' && displayedProducts.length === 0 && (
-          <div className="flex-1 flex flex-col items-center justify-center text-center space-y-8 mt-10">
-            <motion.h1
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="text-4xl md:text-7xl font-serif font-medium text-gray-900 leading-tight"
-            >
-              Bolo, kya chahiye?
-            </motion.h1>
-            <motion.p
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ delay: 0.2 }}
-              className="text-gray-400 text-lg"
-            >
-              Tap to speak in Hindi or English
-            </motion.p>
+        {/* Greeting */}
+        <div className="text-center space-y-4">
+          <motion.h1
+            key={language.code}
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="text-4xl md:text-7xl font-serif font-medium text-gray-900 leading-tight"
+          >
+            {language.greeting}
+          </motion.h1>
 
-            <div className="flex flex-wrap justify-center gap-3 max-w-md">
-              {SUGGESTED_QUERIES.map((q, i) => (
-                <motion.button
-                  key={i}
-                  initial={{ opacity: 0, scale: 0.9 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  transition={{ delay: 0.4 + (i * 0.1) }}
-                  onClick={() => {
-                    setTranscript(q);
-                    handleAIAction({ type: 'SEARCH', query: q, speakResponse: `Searching for ${q}` });
-                  }}
-                  className="px-4 py-2 bg-white border border-gray-200 rounded-full text-sm text-gray-600 shadow-sm hover:border-saffron-300 hover:text-saffron-600 transition-colors"
-                >
-                  &quot;{q}&quot;
-                </motion.button>
-              ))}
-            </div>
-          </div>
-        )}
+          <motion.p
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ delay: 0.15 }}
+            className="text-gray-400 text-base"
+          >
+            {statusLabel(status, language)}
+          </motion.p>
+        </div>
 
-        {/* LISTENING / PROCESSING */}
-        {(mode === 'LISTENING' || mode === 'PROCESSING') && (
-          <div className="flex-1 flex flex-col items-center justify-center">
-            <Waveform className="h-32" />
-          </div>
-        )}
+        {/* Language selector */}
+        <LanguageSelector selected={language} onChange={handleLanguageChange} />
 
-        {/* CONFIRMATION */}
-        {mode === 'CONFIRMATION' && (
-          <div className="flex-1 flex flex-col items-center justify-center text-center pt-10 pb-6">
+        {/* Transcripts */}
+        <div className="flex flex-col items-center gap-3 w-full max-w-sm min-h-[80px] justify-end">
+          <AnimatePresence>
+            {userTranscript && (
+              <motion.p
+                key="user"
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0 }}
+                className="text-sm text-gray-400 text-center italic"
+              >
+                {userTranscript}
+              </motion.p>
+            )}
+          </AnimatePresence>
+          <AnimatePresence>
+            {agentTranscript && (
+              <motion.div
+                key="agent"
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0 }}
+                className="px-5 py-3 rounded-2xl bg-gray-900 text-white text-sm text-center shadow-sm"
+              >
+                {agentTranscript}
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+
+        {/* Search logs — real-time from backend */}
+        <AnimatePresence>
+          {(isSearching || searchLogs.length > 0) && !searchResults.length && (
             <motion.div
-              initial={{ scale: 0, rotate: -180 }}
-              animate={{ scale: 1, rotate: 0 }}
-              transition={{ type: "spring", damping: 15, stiffness: 200 }}
-              className="w-28 h-28 bg-[#22C55E] rounded-full flex items-center justify-center mb-6 shadow-2xl shadow-green-200"
+              key="search-logs"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              className="w-full max-w-sm font-mono text-xs space-y-1.5"
             >
-              <Check className="w-14 h-14 text-white stroke-[3]" />
+              <AnimatePresence initial={false}>
+                {searchLogs.map((line, i) => (
+                  <motion.div
+                    key={i}
+                    initial={{ opacity: 0, x: -6 }}
+                    animate={{ opacity: i === searchLogs.length - 1 && isSearching ? 1 : 0.4 }}
+                    className="flex items-center gap-2 text-gray-500"
+                  >
+                    {i === searchLogs.length - 1 && isSearching ? (
+                      <Loader2 className="w-3 h-3 text-saffron-500 animate-spin shrink-0" />
+                    ) : (
+                      <span className="text-green-500 shrink-0">✓</span>
+                    )}
+                    {line}
+                  </motion.div>
+                ))}
+              </AnimatePresence>
             </motion.div>
+          )}
+        </AnimatePresence>
 
-            <motion.h2
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.2 }}
-              className="text-4xl font-hindi font-bold text-gray-900 mb-2"
-            >
-              ऑर्डर कन्फर्म!
-            </motion.h2>
-
-            <motion.p
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ delay: 0.3 }}
-              className="text-gray-500 mb-10"
-            >
-              Order #AK45123 confirmed successfully
-            </motion.p>
-
+        {/* Search results grid */}
+        <AnimatePresence>
+          {searchResults.length > 0 && !isSearching && (
             <motion.div
-              initial={{ opacity: 0, y: 20 }}
+              key="results"
+              initial={{ opacity: 0, y: 12 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.4 }}
-              className="bg-white rounded-3xl p-6 shadow-xl shadow-gray-100/50 border border-gray-100 w-full max-w-sm mx-auto text-left space-y-6"
+              exit={{ opacity: 0 }}
+              className="w-full"
             >
-              <div className="flex items-start gap-4">
-                <div className="w-12 h-12 bg-gray-50 rounded-2xl flex items-center justify-center flex-shrink-0">
-                  <Package className="w-6 h-6 text-gray-800" strokeWidth={1.5} />
-                </div>
-                <div>
-                  <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-0.5">Delivery</p>
-                  <p className="text-gray-900 font-semibold text-lg leading-tight">Tomorrow, 6:00 PM</p>
-                </div>
-              </div>
-
-              <div className="flex items-start gap-4">
-                <div className="w-12 h-12 bg-gray-50 rounded-2xl flex items-center justify-center flex-shrink-0">
-                  <MapPin className="w-6 h-6 text-gray-800" strokeWidth={1.5} />
-                </div>
-                <div>
-                  <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-0.5">Address</p>
-                  <p className="text-gray-900 font-semibold text-lg leading-tight">Home • Sector 42, Gurgaon</p>
-                </div>
-              </div>
-
-              <div className="flex items-start gap-4">
-                <div className="w-12 h-12 bg-green-50 rounded-2xl flex items-center justify-center flex-shrink-0">
-                  <Clock className="w-6 h-6 text-[#22C55E]" strokeWidth={2} />
-                </div>
-                <div>
-                  <p className="text-[10px] font-bold text-[#22C55E] uppercase tracking-wider mb-0.5">Status</p>
-                  <p className="text-green-700 font-semibold text-lg leading-tight">Rider Assigned: Rajesh</p>
-                </div>
+              <p className="text-xs text-gray-400 text-center mb-3">
+                {searchResults.length} results for &ldquo;{searchQuery}&rdquo;
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                {searchResults.map(product => (
+                  <ProductCard
+                    key={product.id}
+                    product={product}
+                    onAdd={addToCart}
+                    isAdded={cart.some(i => i.product.id === product.id)}
+                  />
+                ))}
               </div>
             </motion.div>
+          )}
+        </AnimatePresence>
 
-            <motion.button
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ delay: 0.6 }}
-              onClick={resetApp}
-              className="mt-12 flex items-center gap-2 text-gray-900 font-semibold hover:text-gray-600 transition-colors"
-            >
-              <RotateCw className="w-5 h-5" />
-              Order Again
-            </motion.button>
-          </div>
+        {/* Error */}
+        {error && (
+          <p className="text-red-500 text-sm text-center">{error}</p>
         )}
 
-        {/* RESULTS */}
-        {(mode === 'RESULTS' || displayedProducts.length > 0) && mode !== 'CONFIRMATION' && (
-          <div className="space-y-6">
-            <div className="flex items-center justify-between">
-              <h2 className="text-xl font-serif font-semibold text-gray-800">
-                Here is what I found
-              </h2>
-              {lastAIResponse && (
-                <span className="text-sm text-saffron-600 italic">&quot;{lastAIResponse}&quot;</span>
-              )}
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {displayedProducts.map(p => (
-                <ProductCard
-                  key={p.id}
-                  product={p}
-                  onAdd={addToCart}
-                />
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Floating Mic */}
-        {mode !== 'CONFIRMATION' && (
-          <div className="fixed bottom-8 left-0 right-0 flex flex-col items-center justify-end z-30 pointer-events-none">
-
-            <AnimatePresence>
-              {mode === 'RESULTS' && (
-                <motion.div
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: 10 }}
-                  className="mb-4 bg-white/90 backdrop-blur-sm px-4 py-2 rounded-full shadow-lg border border-gray-100 flex items-center gap-3 pointer-events-auto"
-                >
-                  <Waveform className="h-6 w-16" />
-                  <span className="text-xs font-medium text-gray-500">Listening for checkout...</span>
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            <AnimatePresence>
-              {(mode === 'LISTENING' || mode === 'PROCESSING') && (
-                <motion.div
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: 10 }}
-                  className="mb-6 px-6 py-4 bg-white/90 backdrop-blur-md shadow-xl rounded-2xl max-w-sm mx-4 text-center pointer-events-auto"
-                >
-                  {mode === 'PROCESSING' ? (
-                    <div className="flex items-center gap-2 text-gray-500 font-medium">
-                      Thinking...
-                    </div>
-                  ) : (
-                    <p className="text-lg font-medium text-gray-800">
-                      {transcript || "Listening..."}
-                    </p>
-                  )}
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            <div className="pointer-events-auto">
-              <MicButton
-                mode={mode}
-                isListening={mode === 'LISTENING'}
-                onClick={mode === 'LISTENING' ? stopListening : startListening}
-              />
-            </div>
-          </div>
-        )}
       </main>
 
+      {/* Floating mic */}
+      <div className="fixed bottom-10 left-0 right-0 flex justify-center z-30">
+        <MicToggle status={status} onStart={connect} onStop={disconnect} />
+      </div>
+
+      {/* Cart */}
       <CartDrawer
         isOpen={isCartOpen}
         onClose={() => setIsCartOpen(false)}
         items={cart}
-        onCheckout={() => {
-          setIsCartOpen(false);
-          setMode('CONFIRMATION');
-        }}
+        onCheckout={() => setIsCartOpen(false)}
       />
     </div>
   );

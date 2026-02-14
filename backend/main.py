@@ -12,14 +12,9 @@ Endpoints:
 import asyncio
 import json
 import os
-import sys
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-
-# Windows requires ProactorEventLoop for subprocess support (browser_use uses create_subprocess_exec)
-if sys.platform == 'win32':
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException

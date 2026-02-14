@@ -1,6 +1,4 @@
-# AudioKirana - Voice-First Grocery Shopping for Bharat
-
-## The Vision
+# **Bolke** is a voice-first, vernacular grocery shopping agent for the "next billion users" in India.sion
 Voice OS for grocery shopping that works with ANY platform (Zepto, Blinkit, BigBasket, Swiggy). 300M Indians gain access to e-commerce through natural Hindi conversation.
 
 ---
@@ -47,7 +45,7 @@ Voice OS for grocery shopping that works with ANY platform (Zepto, Blinkit, BigB
 
 #### Hours 0-4: Frontend Setup
 ```bash
-npx create-next-app audiokirana
+npx create-next-app# Bolke (bolke)
 cd audiokirana
 npm install
 ```

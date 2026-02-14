@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="hi">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bolke — Voice Grocery Shopping</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            color: #e0e0e0;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        header {
+            text-align: center;
+            padding: 2rem 1rem 1rem;
+        }
+
+        header h1 {
+            font-size: 2rem;
+            background: linear-gradient(90deg, #ff6b35, #f7c948);
+            background-clip: text;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        header p {
+            color: #888;
+            margin-top: 0.3rem;
+            font-size: 0.9rem;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 600px;
+            padding: 1rem;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        /* Mic Button */
+        .mic-area {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.8rem;
+            padding: 1.5rem;
+        }
+
+        #mic-btn {
+            width: 90px;
+            height: 90px;
+            border-radius: 50%;
+            border: none;
+            background: linear-gradient(145deg, #ff6b35, #e84118);
+            color: white;
+            font-size: 2.2rem;
+            cursor: pointer;
+            box-shadow: 0 4px 25px rgba(255, 107, 53, 0.4);
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #mic-btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 6px 35px rgba(255, 107, 53, 0.6);
+        }
+
+        #mic-btn.listening {
+            animation: pulse 1.5s infinite;
+            background: linear-gradient(145deg, #e84118, #c23616);
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                box-shadow: 0 0 0 0 rgba(255, 107, 53, 0.5);
+            }
+
+            50% {
+                box-shadow: 0 0 0 20px rgba(255, 107, 53, 0);
+            }
+        }
+
+        #mic-status {
+            font-size: 0.85rem;
+            color: #aaa;
+        }
+
+        /* Transcript */
+        #transcript-box {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            padding: 1rem;
+            min-height: 50px;
+            font-style: italic;
+            color: #ccc;
+            display: none;
+        }
+
+        /* AI Response */
+        #response-box {
+            background: rgba(255, 107, 53, 0.08);
+            border: 1px solid rgba(255, 107, 53, 0.2);
+            border-radius: 12px;
+            padding: 1rem;
+            display: none;
+        }
+
+        #response-box .label {
+            font-size: 0.75rem;
+            color: #ff6b35;
+            margin-bottom: 0.3rem;
+            font-weight: 600;
+        }
+
+        #response-box .text {
+            font-size: 1.05rem;
+            line-height: 1.5;
+        }
+
+        /* Results */
+        #results-box {
+            display: none;
+            flex-direction: column;
+            gap: 0.8rem;
+        }
+
+        #results-box h3 {
+            color: #f7c948;
+            font-size: 1rem;
+        }
+
+        .product-card {
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            padding: 0.8rem 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .product-card .name {
+            font-weight: 500;
+        }
+
+        .product-card .provider {
+            font-size: 0.7rem;
+            padding: 2px 8px;
+            border-radius: 20px;
+            background: rgba(255, 107, 53, 0.2);
+            color: #ff6b35;
+        }
+
+        .product-card .price {
+            font-weight: 700;
+            color: #4cd137;
+            font-size: 1.1rem;
+        }
+
+        /* Loading */
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 2rem;
+            color: #aaa;
+        }
+
+        .loading.active {
+            display: block;
+        }
+
+        .spinner {
+            width: 30px;
+            height: 30px;
+            border: 3px solid rgba(255, 107, 53, 0.2);
+            border-top-color: #ff6b35;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin: 0 auto 0.5rem;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* Cart */
+        #cart-box {
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            padding: 1rem;
+            display: none;
+        }
+
+        #cart-box h3 {
+            color: #f7c948;
+            margin-bottom: 0.5rem;
+        }
+
+        #checkout-btn {
+            margin-top: 0.8rem;
+            width: 100%;
+            padding: 0.8rem;
+            background: linear-gradient(90deg, #ff6b35, #e84118);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        #checkout-btn:hover {
+            opacity: 0.9;
+        }
+
+        footer {
+            text-align: center;
+            padding: 1rem;
+            color: #555;
+            font-size: 0.75rem;
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <h1>🎙️ Bolke</h1>
+        <p>Voice se grocery order karo — Zepto, Blinkit, sabse sasta!</p>
+    </header>
+
+    <div class="container">
+        <div class="mic-area">
+            <button id="mic-btn" onclick="toggleMic()">🎤</button>
+            <span id="mic-status">Mic dabao aur bolo</span>
+        </div>
+
+        <div id="transcript-box"></div>
+
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p>Zepto aur Blinkit pe dhundh raha hoon...</p>
+        </div>
+
+        <div id="response-box">
+            <div class="label">🤖 Bolke</div>
+            <div class="text" id="response-text"></div>
+        </div>
+
+        <div id="results-box"></div>
+
+        <div id="cart-box">
+            <h3>🛒 Cart</h3>
+            <div id="cart-items"></div>
+            <button id="checkout-btn" onclick="checkout()">Order Place Karo 🚀</button>
+        </div>
+    </div>
+
+    <footer>Bolke — Built for Google AIFF Hackathon 2025</footer>
+
+    <script>
+        const API_BASE = window.location.origin;
+        let isListening = false;
+        let recognition = null;
+        let cart = [];
+        let sessionId = crypto.randomUUID();
+
+        // ---- Speech Recognition Setup ----
+        if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            recognition = new SpeechRecognition();
+            recognition.continuous = false;
+            recognition.interimResults = true;
+            recognition.lang = 'hi-IN'; // Hindi primary, also picks up English
+
+            recognition.onresult = (event) => {
+                const transcript = Array.from(event.results)
+                    .map(r => r[0].transcript)
+                    .join('');
+                showTranscript(transcript);
+                if (event.results[0].isFinal) {
+                    stopListening();
+                    processVoice(transcript);
+                }
+            };
+
+            recognition.onerror = (e) => {
+                console.error('Speech error:', e.error);
+                stopListening();
+                setStatus('Error: ' + e.error + '. Try again.');
+            };
+
+            recognition.onend = () => {
+                if (isListening) stopListening();
+            };
+        } else {
+            document.getElementById('mic-status').textContent = 'Browser does not support speech recognition';
+            document.getElementById('mic-btn').disabled = true;
+        }
+
+        function toggleMic() {
+            if (isListening) {
+                recognition.stop();
+                stopListening();
+            } else {
+                startListening();
+            }
+        }
+
+        function startListening() {
+            isListening = true;
+            document.getElementById('mic-btn').classList.add('listening');
+            setStatus('🔴 Sun raha hoon... bolo!');
+            recognition.start();
+        }
+
+        function stopListening() {
+            isListening = false;
+            document.getElementById('mic-btn').classList.remove('listening');
+            setStatus('Mic dabao aur bolo');
+        }
+
+        function setStatus(text) {
+            document.getElementById('mic-status').textContent = text;
+        }
+
+        function showTranscript(text) {
+            const box = document.getElementById('transcript-box');
+            box.textContent = `"${text}"`;
+            box.style.display = 'block';
+        }
+
+        // ---- API Calls ----
+        async function processVoice(text) {
+            showLoading(true);
+            hideResults();
+
+            try {
+                const res = await fetch(`${API_BASE}/api/voice`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        text: text,
+                        session_id: sessionId,
+                        cart: cart,
+                    }),
+                });
+
+                const data = await res.json();
+                showLoading(false);
+
+                // Show AI response
+                showResponse(data.response_text);
+                speak(data.response_text);
+
+                // Show search results if available
+                if (data.search_results) {
+                    showSearchResults(data.search_results);
+                }
+
+                // Handle checkout intent
+                if (data.intent === 'CHECKOUT' && cart.length > 0) {
+                    checkout();
+                }
+
+            } catch (err) {
+                showLoading(false);
+                showResponse('Server se connect nahi ho paya. Backend chal raha hai?');
+                console.error('API error:', err);
+            }
+        }
+
+        // ---- UI Updates ----
+        function showLoading(show) {
+            document.getElementById('loading').classList.toggle('active', show);
+        }
+
+        function showResponse(text) {
+            const box = document.getElementById('response-box');
+            document.getElementById('response-text').textContent = text;
+            box.style.display = 'block';
+        }
+
+        function hideResults() {
+            document.getElementById('results-box').style.display = 'none';
+        }
+
+        function showSearchResults(results) {
+            const box = document.getElementById('results-box');
+            box.innerHTML = '';
+            box.style.display = 'flex';
+
+            // Show results by provider
+            for (const provider of ['zepto', 'blinkit']) {
+                const products = results[provider] || [];
+                if (products.length === 0) continue;
+
+                const heading = document.createElement('h3');
+                heading.textContent = `${provider === 'zepto' ? '⚡' : '🟡'} ${provider.charAt(0).toUpperCase() + provider.slice(1)}`;
+                if (provider === results.cheapest_provider) {
+                    heading.textContent += ' ✅ Cheapest';
+                }
+                box.appendChild(heading);
+
+                products.forEach(p => {
+                    const card = document.createElement('div');
+                    card.className = 'product-card';
+                    card.innerHTML = `
+                        <div>
+                            <div class="name">${p.name}</div>
+                            <span class="provider">${provider}</span>
+                        </div>
+                        <div class="price">₹${p.price}</div>
+                    `;
+                    card.style.cursor = 'pointer';
+                    card.onclick = () => addToCart(p, provider);
+                    box.appendChild(card);
+                });
+            }
+
+            if (results.price_difference > 0) {
+                const diff = document.createElement('p');
+                diff.style.cssText = 'text-align:center;color:#4cd137;font-weight:600;margin-top:0.5rem;';
+                diff.textContent = `💰 ${results.cheapest_provider} is ₹${results.price_difference.toFixed(0)} cheaper!`;
+                box.appendChild(diff);
+            }
+        }
+
+        function addToCart(product, provider) {
+            cart.push({ ...product, provider });
+            updateCartUI();
+        }
+
+        function updateCartUI() {
+            const box = document.getElementById('cart-box');
+            const itemsDiv = document.getElementById('cart-items');
+            if (cart.length === 0) {
+                box.style.display = 'none';
+                return;
+            }
+            box.style.display = 'block';
+            itemsDiv.innerHTML = cart.map((item, i) => `
+                <div class="product-card" style="margin-bottom:0.4rem;">
+                    <div>
+                        <div class="name">${item.name}</div>
+                        <span class="provider">${item.provider}</span>
+                    </div>
+                    <div class="price">₹${item.price}</div>
+                </div>
+            `).join('');
+
+            const total = cart.reduce((sum, item) => sum + (item.price || 0), 0);
+            itemsDiv.innerHTML += `<p style="text-align:right;margin-top:0.5rem;font-weight:700;">Total: ₹${total.toFixed(0)}</p>`;
+        }
+
+        async function checkout() {
+            if (cart.length === 0) {
+                showResponse('Cart khaali hai! Pehle kuch add karo.');
+                return;
+            }
+            showLoading(true);
+            showResponse('Order place ho raha hai... browser automation chal raha hai 🚀');
+            speak('Order place ho raha hai, thoda wait karo');
+
+            try {
+                // Group by provider and order from cheapest
+                const providers = {};
+                cart.forEach(item => {
+                    if (!providers[item.provider]) providers[item.provider] = [];
+                    providers[item.provider].push(item.name);
+                });
+
+                const provider = Object.keys(providers)[0]; // Pick first provider for now
+                const items = providers[provider];
+
+                const res = await fetch(`${API_BASE}/api/checkout`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        items: items,
+                        provider: provider,
+                        session_id: sessionId,
+                    }),
+                });
+
+                const data = await res.json();
+                showLoading(false);
+
+                if (data.success) {
+                    showResponse(`Order placed! 🎉 Order ID: ${data.order_id}. ${data.estimated_delivery} mein aa jayega.`);
+                    speak(`Order ho gaya! ${data.estimated_delivery} mein aa jayega`);
+                    cart = [];
+                    updateCartUI();
+                } else {
+                    showResponse(`Order issue: ${data.message}. Dobara try karo.`);
+                }
+            } catch (err) {
+                showLoading(false);
+                showResponse('Order place nahi ho paya. Backend check karo.');
+                console.error('Checkout error:', err);
+            }
+        }
+
+        // ---- Text-to-Speech ----
+        function speak(text) {
+            if ('speechSynthesis' in window) {
+                window.speechSynthesis.cancel();
+                const utterance = new SpeechSynthesisUtterance(text);
+                utterance.lang = 'hi-IN';
+                utterance.rate = 1.0;
+                utterance.pitch = 1.0;
+                window.speechSynthesis.speak(utterance);
+            }
+        }
+    </script>
+</body>
+
+</html>

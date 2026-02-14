@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+@theme {
+  --color-saffron-50: #FFF8F0;
+  --color-saffron-200: #FFCC99;
+  --color-saffron-400: #FFB366;
+  --color-saffron-500: #FF9933;
+  --color-saffron-600: #E68A2E;
+  --color-offwhite: #F9F9F9;
+  --color-charcoal: #1A1A1A;
+
+  --font-sans: var(--font-inter), sans-serif;
+  --font-hindi: var(--font-noto-devanagari), sans-serif;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #E5E5E5; border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: #D4D4D4; }
+
+body {
+  background-color: #FAFAFA;
+  color: #1A1A1A;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Tailwind v4 @theme puts --font-serif on :root, but Next.js injects
+   --font-eb-garamond on body — so var() can't resolve across that boundary.
+   Override font-serif directly here instead. */
+.font-serif {
+  font-family: var(--font-eb-garamond), "EB Garamond", Georgia, serif;
+}
+
+.font-hindi {
+  font-family: var(--font-noto-devanagari), "Noto Sans Devanagari", sans-serif;
+}
